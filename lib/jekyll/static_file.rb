@@ -1,6 +1,12 @@
+# frozen_string_literal: true
+
 module Jekyll
   class StaticFile
+    extend Forwardable
+
     attr_reader :relative_path, :extname, :name
+
+    def_delegator :to_liquid, :to_json, :to_json
 
     class << self
       # The cache of last modification times [path] -> mtime.
@@ -19,7 +25,7 @@ module Jekyll
     # base - The String path to the <source>.
     # dir  - The String path between <source> and the file.
     # name - The String filename of the file.
-    # rubocop: disable ParameterLists
+    # rubocop: disable Metrics/ParameterLists
     def initialize(site, base, dir, name, collection = nil)
       @site = site
       @base = base
@@ -29,11 +35,18 @@ module Jekyll
       @relative_path = File.join(*[@dir, @name].compact)
       @extname = File.extname(@name)
     end
-    # rubocop: enable ParameterLists
+    # rubocop: enable Metrics/ParameterLists
 
     # Returns source file path.
     def path
-      File.join(*[@base, @dir, @name].compact)
+      @path ||= begin
+        # Static file is from a collection inside custom collections directory
+        if !@collection.nil? && !@site.config["collections_dir"].empty?
+          File.join(*[@base, @site.config["collections_dir"], @dir, @name].compact)
+        else
+          File.join(*[@base, @dir, @name].compact)
+        end
+      end
     end
 
     # Obtain destination path.
@@ -42,7 +55,8 @@ module Jekyll
     #
     # Returns destination file path.
     def destination(dest)
-      @site.in_dest_dir(*[dest, destination_rel_dir, @name].compact)
+      dest = @site.in_dest_dir(dest)
+      @site.in_dest_dir(dest, Jekyll::URL.unescape_path(url))
     end
 
     def destination_rel_dir
@@ -74,7 +88,10 @@ module Jekyll
     # Returns true unless the defaults for the destination path from
     # _config.yml contain `published: false`.
     def write?
-      defaults.fetch("published", true)
+      publishable = defaults.fetch("published", true)
+      return publishable unless @collection
+
+      publishable && @collection.write?
     end
 
     # Write the static file to the destination directory (if modified).
@@ -84,8 +101,8 @@ module Jekyll
     # Returns false if the file was not modified since last time (no-op).
     def write(dest)
       dest_path = destination(dest)
-
       return false if File.exist?(dest_path) && !modified?
+
       self.class.mtimes[path] = mtime
 
       FileUtils.mkdir_p(File.dirname(dest_path))
@@ -95,39 +112,66 @@ module Jekyll
       true
     end
 
+    def data
+      @data ||= @site.frontmatter_defaults.all(relative_path, type)
+    end
+
     def to_liquid
-      {
-        "basename"      => File.basename(name, extname),
-        "name"          => name,
-        "extname"       => extname,
-        "modified_time" => modified_time,
-        "path"          => File.join("", relative_path)
-      }
+      @to_liquid ||= Drops::StaticFileDrop.new(self)
+    end
+
+    # Generate "basename without extension" and strip away any trailing periods.
+    # NOTE: `String#gsub` removes all trailing periods (in comparison to `String#chomp`)
+    def basename
+      @basename ||= File.basename(name, extname).gsub(%r!\.*\z!, "")
     end
 
     def placeholders
       {
         :collection => @collection.label,
-        :path       => relative_path[
-          @collection.relative_directory.size..relative_path.size],
+        :path       => cleaned_relative_path,
         :output_ext => "",
-        :name       => "",
-        :title      => ""
+        :name       => basename,
+        :title      => "",
       }
+    end
+
+    # Similar to Jekyll::Document#cleaned_relative_path.
+    # Generates a relative path with the collection's directory removed when applicable
+    #   and additionally removes any multiple periods in the string.
+    #
+    # NOTE: `String#gsub!` removes all trailing periods (in comparison to `String#chomp!`)
+    #
+    # Examples:
+    #   When `relative_path` is "_methods/site/my-cool-avatar...png":
+    #     cleaned_relative_path
+    #     # => "/site/my-cool-avatar"
+    #
+    # Returns the cleaned relative path of the static file.
+    def cleaned_relative_path
+      @cleaned_relative_path ||= begin
+        cleaned = relative_path[0..-extname.length - 1]
+        cleaned.gsub!(%r!\.*\z!, "")
+        cleaned.sub!(@collection.relative_directory, "") if @collection
+        cleaned
+      end
     end
 
     # Applies a similar URL-building technique as Jekyll::Document that takes
     # the collection's URL template into account. The default URL template can
     # be overriden in the collection's configuration in _config.yml.
     def url
-      @url ||= if @collection.nil?
-                 relative_path
+      @url ||= begin
+        base = if @collection.nil?
+                 cleaned_relative_path
                else
-                 ::Jekyll::URL.new({
+                 Jekyll::URL.new(
                    :template     => @collection.url_template,
                    :placeholders => placeholders
-                 })
-               end.to_s.gsub(%r!/$!, "")
+                 )
+               end.to_s.chomp("/")
+        base << extname
+      end
     end
 
     # Returns the type of the collection if present, nil otherwise.
@@ -141,7 +185,14 @@ module Jekyll
       @defaults ||= @site.frontmatter_defaults.all url, type
     end
 
+    # Returns a debug string on inspecting the static file.
+    # Includes only the relative path of the object.
+    def inspect
+      "#<#{self.class} @relative_path=#{relative_path.inspect}>"
+    end
+
     private
+
     def copy_file(dest_path)
       if @site.safe || Jekyll.env == "production"
         FileUtils.cp(path, dest_path)

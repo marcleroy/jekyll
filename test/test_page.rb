@@ -1,3 +1,5 @@
+# frozen_string_literal: true
+
 require "helper"
 
 class TestPage < JekyllUnitTest
@@ -12,7 +14,7 @@ class TestPage < JekyllUnitTest
 
   def do_render(page)
     layouts = {
-      "default" => Layout.new(@site, source_dir("_layouts"), "simple.html")
+      "default" => Layout.new(@site, source_dir("_layouts"), "simple.html"),
     }
     page.render(layouts, @site.site_payload)
   end
@@ -20,17 +22,22 @@ class TestPage < JekyllUnitTest
   context "A Page" do
     setup do
       clear_dest
-      @site = Site.new(Jekyll.configuration({
-        "source"            => source_dir,
-        "destination"       => dest_dir,
-        "skip_config_files" => true
-      }))
+      @site = Site.new(Jekyll.configuration(
+                         "source"            => source_dir,
+                         "destination"       => dest_dir,
+                         "skip_config_files" => true
+                       ))
     end
 
     context "processing pages" do
       should "create URL based on filename" do
         @page = setup_page("contacts.html")
         assert_equal "/contacts.html", @page.url
+      end
+
+      should "create proper URL from filename" do
+        @page = setup_page("trailing-dots...md")
+        assert_equal "/trailing-dots.html", @page.url
       end
 
       should "not published when published yaml is false" do
@@ -90,13 +97,17 @@ class TestPage < JekyllUnitTest
           :permalink => "/properties/",
           :published => nil,
           :title     => "Properties Page",
-          :url       => "/properties/"
+          :url       => "/properties/",
         }
 
         attrs.each do |attr, val|
           attr_str = attr.to_s
           result = page[attr_str]
-          assert_equal val, result, "For <page[\"#{attr_str}\"]>:"
+          if val.nil?
+            assert_nil result, "For <page[\"#{attr_str}\"]>:"
+          else
+            assert_equal val, result, "For <page[\"#{attr_str}\"]>:"
+          end
         end
       end
 
@@ -220,7 +231,7 @@ class TestPage < JekyllUnitTest
 
       should "return nil permalink if no permalink exists" do
         @page = setup_page("")
-        assert_equal nil, @page.permalink
+        assert_nil @page.permalink
       end
 
       should "not be writable outside of destination" do
@@ -354,6 +365,45 @@ class TestPage < JekyllUnitTest
 
           assert File.directory?(dest_dir)
           assert_exist dest_dir("contacts", "bar", "index.html")
+        end
+      end
+
+      context "read-in by default" do
+        should "not expose an excerpt to Liquid templates" do
+          page = setup_page("/contacts", "bar.html")
+          assert_nil page.to_liquid["excerpt"]
+        end
+
+        should "expose an excerpt to Liquid templates if site is configured to" do
+          configured_site = fixture_site("page_excerpts" => true)
+          test_page = Jekyll::Page.new(configured_site, source_dir, "/contacts", "bar.html")
+          assert_equal "Contact Information\n", test_page.to_liquid["excerpt"]
+        end
+
+        should "not expose an excerpt for non-html pages even in a configured site" do
+          configured_site = fixture_site("page_excerpts" => true)
+          test_page = Jekyll::Page.new(configured_site, source_dir, "assets", "test-styles.scss")
+          refute_equal ".half { width: 50%; }\n", test_page.to_liquid["excerpt"]
+          assert_nil test_page.to_liquid["excerpt"]
+        end
+      end
+
+      context "generated via plugin" do
+        setup do
+          PageSubclass = Class.new(Jekyll::Page)
+          @test_page = PageSubclass.new(@site, source_dir, "/contacts", "bar.html")
+          @test_page.data.clear
+        end
+
+        should "not expose an excerpt to Liquid templates by default" do
+          assert_equal "Contact Information\n", @test_page.content
+          assert_nil @test_page.to_liquid["excerpt"]
+        end
+
+        should "expose an excerpt to Liquid templates if hardcoded" do
+          @test_page.data["excerpt"] = "Test excerpt."
+          assert_equal "Contact Information\n", @test_page.content
+          assert_equal "Test excerpt.", @test_page.to_liquid["excerpt"]
         end
       end
     end

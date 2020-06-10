@@ -1,14 +1,16 @@
+# frozen_string_literal: true
+
 require "helper"
 
 class TestEntryFilter < JekyllUnitTest
   context "Filtering entries" do
     setup do
-      @site = Site.new(site_configuration)
+      @site = fixture_site
     end
 
     should "filter entries" do
       ent1 = %w(foo.markdown bar.markdown baz.markdown #baz.markdown#
-              .baz.markdow foo.markdown~ .htaccess _posts _pages ~$benbalter.docx)
+                .baz.markdow foo.markdown~ .htaccess _posts _pages ~$benbalter.docx)
 
       entries = EntryFilter.new(@site).filter(ent1)
       assert_equal %w(foo.markdown bar.markdown baz.markdown .htaccess), entries
@@ -17,7 +19,7 @@ class TestEntryFilter < JekyllUnitTest
     should "allow regexp filtering" do
       files = %w(README.md)
       @site.exclude = [
-        %r!README!
+        %r!README!,
       ]
 
       assert_empty @site.reader.filter_entries(
@@ -62,6 +64,16 @@ class TestEntryFilter < JekyllUnitTest
       assert_equal files, @site.reader.filter_entries(files)
     end
 
+    should "not exclude explicitly included entry" do
+      entries  = %w(README TODO css .htaccess _movies/.)
+      excludes = %w(README TODO css)
+      includes = %w(README .htaccess)
+      @site.exclude = excludes
+      @site.include = includes
+      filtered_entries = EntryFilter.new(@site).filter(entries)
+      assert_equal %w(README .htaccess), filtered_entries
+    end
+
     should "keep safe symlink entries when safe mode enabled" do
       allow(File).to receive(:symlink?).with("symlink.js").and_return(true)
       files = %w(symlink.js)
@@ -80,22 +92,35 @@ class TestEntryFilter < JekyllUnitTest
       assert_equal %w(), entries
     end
 
-    # rubocop:disable Performance/FixedSize
     should "include only safe symlinks in safe mode" do
-      site = Site.new(site_configuration("safe" => true))
+      # no support for symlinks on Windows
+      skip_if_windows "Jekyll does not currently support symlinks on Windows."
+
+      site = fixture_site("safe" => true)
       site.reader.read_directories("symlink-test")
 
       assert_equal %w(main.scss symlinked-file).length, site.pages.length
       refute_equal [], site.static_files
     end
-    # rubocop:enable Performance/FixedSize
 
     should "include symlinks in unsafe mode" do
-      site = Site.new(site_configuration)
+      # no support for symlinks on Windows
+      skip_if_windows "Jekyll does not currently support symlinks on Windows."
 
+      @site.reader.read_directories("symlink-test")
+      refute_equal [], @site.pages
+      refute_equal [], @site.static_files
+    end
+
+    should "include only safe symlinks in safe mode even when included" do
+      # no support for symlinks on Windows
+      skip_if_windows "Jekyll does not currently support symlinks on Windows."
+
+      site = fixture_site("safe" => true, "include" => ["symlinked-file-outside-source"])
       site.reader.read_directories("symlink-test")
-      refute_equal [], site.pages
-      refute_equal [], site.static_files
+
+      assert_equal %w(main.scss symlinked-file).length, site.pages.length
+      refute_includes site.static_files.map(&:name), "symlinked-file-outside-source"
     end
   end
 
@@ -127,6 +152,19 @@ class TestEntryFilter < JekyllUnitTest
       data = ["vendor/bundle"]
       assert @filter.glob_include?(data, "/vendor/bundle")
       assert @filter.glob_include?(data, "vendor/bundle")
+    end
+
+    should "match even if there is no trailing slash" do
+      data = ["/vendor/bundle/", "vendor/ruby"]
+      assert @filter.glob_include?(data, "vendor/bundle/jekyll/lib/page.rb")
+      assert @filter.glob_include?(data, "/vendor/ruby/lib/set.rb")
+    end
+
+    should "match directory only if there is trailing slash" do
+      data = ["_glob_include_test/_is_dir/", "_glob_include_test/_not_dir/"]
+      assert @filter.glob_include?(data, "_glob_include_test/_is_dir")
+      assert @filter.glob_include?(data, "_glob_include_test/_is_dir/include_me.txt")
+      refute @filter.glob_include?(data, "_glob_include_test/_not_dir")
     end
   end
 end

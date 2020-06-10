@@ -1,5 +1,72 @@
 # Frozen-string-literal: true
-# Encoding: utf-8
+
+module Kramdown
+  # A Kramdown::Document subclass meant to optimize memory usage from initializing
+  # a kramdown document for parsing.
+  #
+  # The optimization is by using the same options Hash (and its derivatives) for
+  # converting all Markdown documents in a Jekyll site.
+  class JekyllDocument < Document
+    class << self
+      attr_reader :options, :parser
+
+      # The implementation is basically the core logic in +Kramdown::Document#initialize+
+      #
+      # rubocop:disable Naming/MemoizedInstanceVariableName
+      def setup(options)
+        @cache ||= {}
+
+        # reset variables on a subsequent set up with a different options Hash
+        unless @cache[:id] == options.hash
+          @options = @parser = nil
+          @cache[:id] = options.hash
+        end
+
+        @options ||= Options.merge(options).freeze
+        @parser  ||= begin
+          parser_name = (@options[:input] || "kramdown").to_s
+          parser_name = parser_name[0..0].upcase + parser_name[1..-1]
+          try_require("parser", parser_name)
+
+          if Parser.const_defined?(parser_name)
+            Parser.const_get(parser_name)
+          else
+            raise Kramdown::Error, "kramdown has no parser to handle the specified " \
+                                   "input format: #{@options[:input]}"
+          end
+        end
+      end
+      # rubocop:enable Naming/MemoizedInstanceVariableName
+
+      private
+
+      def try_require(type, name)
+        require "kramdown/#{type}/#{Utils.snake_case(name)}"
+      rescue LoadError
+        false
+      end
+    end
+
+    def initialize(source, options = {})
+      JekyllDocument.setup(options)
+
+      @options = JekyllDocument.options
+      @root, @warnings = JekyllDocument.parser.parse(source, @options)
+    end
+
+    # Use Kramdown::Converter::Html class to convert this document into HTML.
+    #
+    # The implementation is basically an optimized version of core logic in
+    # +Kramdown::Document#method_missing+ from kramdown-2.1.0.
+    def to_html
+      output, warnings = Kramdown::Converter::Html.convert(@root, @options)
+      @warnings.concat(warnings)
+      output
+    end
+  end
+end
+
+#
 
 module Jekyll
   module Converters
@@ -11,15 +78,15 @@ module Jekyll
           "line_numbers"      => "inline",
           "line_number_start" => 1,
           "tab_width"         => 4,
-          "wrap"              => "div"
+          "wrap"              => "div",
         }.freeze
 
         def initialize(config)
-          Jekyll::External.require_with_graceful_fail "kramdown"
           @main_fallback_highlighter = config["highlighter"] || "rouge"
           @config = config["kramdown"] || {}
           @highlighter = nil
           setup
+          load_dependencies
         end
 
         # Setup and normalize the configuration:
@@ -32,24 +99,36 @@ module Jekyll
         def setup
           @config["syntax_highlighter"] ||= highlighter
           @config["syntax_highlighter_opts"] ||= {}
+          @config["syntax_highlighter_opts"]["default_lang"] ||= "plaintext"
+          @config["syntax_highlighter_opts"]["guess_lang"] = @config["guess_lang"]
           @config["coderay"] ||= {} # XXX: Legacy.
           modernize_coderay_config
-          make_accessible
         end
 
         def convert(content)
-          Kramdown::Document.new(content, @config).to_html
+          document = Kramdown::JekyllDocument.new(content, @config)
+          html_output = document.to_html
+          if @config["show_warnings"]
+            document.warnings.each do |warning|
+              Jekyll.logger.warn "Kramdown warning:", warning
+            end
+          end
+          html_output
         end
 
         private
-        def make_accessible(hash = @config)
-          proc_ = proc { |hash_, key| hash_[key.to_s] if key.is_a?(Symbol) }
-          hash.default_proc = proc_
 
-          hash.each do |_, val|
-            make_accessible val if val.is_a?(
-              Hash
-            )
+        def load_dependencies
+          require "kramdown-parser-gfm" if @config["input"] == "GFM"
+
+          if highlighter == "coderay"
+            Jekyll::External.require_with_graceful_fail("kramdown-syntax-coderay")
+          end
+
+          # `mathjax` emgine is bundled within kramdown-2.x and will be handled by
+          # kramdown itself.
+          if (math_engine = @config["math_engine"]) && math_engine != "mathjax"
+            Jekyll::External.require_with_graceful_fail("kramdown-math-#{math_engine}")
           end
         end
 
@@ -58,8 +137,6 @@ module Jekyll
         #   config[highlighter]
         # Where `enable_coderay` is now deprecated because Kramdown
         # supports Rouge now too.
-
-        private
         def highlighter
           return @highlighter if @highlighter
 
@@ -83,10 +160,9 @@ module Jekyll
           end
         end
 
-        private
         def strip_coderay_prefix(hash)
           hash.each_with_object({}) do |(key, val), hsh|
-            cleaned_key = key.gsub(%r!\Acoderay_!, "")
+            cleaned_key = key.to_s.gsub(%r!\Acoderay_!, "")
 
             if key != cleaned_key
               Jekyll::Deprecator.deprecation_message(
@@ -101,8 +177,6 @@ module Jekyll
         # If our highlighter is CodeRay we go in to merge the CodeRay defaults
         # with your "coderay" key if it's there, deprecating it in the
         # process of you using it.
-
-        private
         def modernize_coderay_config
           unless @config["coderay"].empty?
             Jekyll::Deprecator.deprecation_message(
